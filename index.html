@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Mapache Skater — Daily, Juice, Share, PWA</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <style>
+    :root { --w:720px; --h:480px; }
+    html,body{height:100%;margin:0;background:#0b1220;color:#f5f5f5;font-family:system-ui,Segoe UI,Arial,sans-serif}
+    .wrap{display:flex;flex-direction:column;align-items:center;gap:12px;padding:16px}
+    .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:center}
+    .btn{background:#10b981;color:white;border:0;border-radius:12px;padding:8px 14px;cursor:pointer}
+    .btn.red{background:#ef4444}
+    .badge{display:inline-flex;align-items:center;gap:6px;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.12);padding:6px 10px;border-radius:12px;font-size:12px}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:center}
+    .board{width:var(--w);max-width:95vw;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:8px 12px}
+    .muted{opacity:.75}
+    canvas{width:var(--w);height:var(--h);border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.08);background:#000}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🦝 Mapache Skater — Daily, Juice, Share, PWA</h1>
+
+  <div class="controls">
+    <span class="badge">Dificultad
+      <select id="selDiff">
+        <option value="easy" selected>Fácil</option>
+        <option value="med">Medio</option>
+        <option value="hard">Duro</option>
+        <option value="insane">Insano</option>
+      </select>
+    </span>
+    <span class="badge"><input id="chkDaily" type="checkbox"> Modo Diario</span>
+    <span class="badge"><input id="chkNES" type="checkbox" checked> NES</span>
+    <span class="badge"><input id="chkWater" type="checkbox" checked> Globos 💧</span>
+    <span class="badge"><input id="chkFos" type="checkbox" checked> Fosforitos 🧨</span>
+    <div class="row">
+      <button id="btnStart" class="btn">Empezar</button>
+      <button id="btnPause" class="btn red">Pausar</button>
+      <button id="btnShare" class="btn">Compartir</button>
+    </div>
+  </div>
+
+  <canvas id="game" width="720" height="480"></canvas>
+
+  <div class="board" id="localBoard">
+    <strong>🏆 Top Local</strong>
+    <ol id="scores" class="muted" style="margin:6px 0 0 18px;"></ol>
+  </div>
+  <p class="muted" style="max-width:var(--w);text-align:center">
+    Sugerencia: sirve esto con un servidor local para PWA/sonido móvil (por ejemplo: VS Code Live Server o <code>python -m http.server</code>).
+  </p>
+</div>
+
+<script>
+(function(){
+  // ====================  ✂️  CONFIG EDITABLE  ✂️  =====================
+  const CANVAS_W = 720, CANVAS_H = 480;
+  const GROUND_OFFSET = 100;
+
+  const RACCOON_SIZE = 150;
+  const PLAYER_RADIUS_FACTOR = 0.40;
+  const CAT_W = 120, CAT_H = 80;
+
+  const NES_SIZE = 100;
+  const WATER_RADIUS = 15;
+  const FOS_FONT_SIZE = 34;
+  const POWER_ICON_SIZE = 50;
+
+  const GRAVITY = 1700;
+  const JUMP_V0 = -820;
+  const COYOTE_MS = 120;
+  const JUMP_BUFFER_MS = 150;
+
+  const START_LIVES = 3;
+  const INVULN_MS = 1200;
+
+  const SPAWN_NES_MS   = 2200;
+  const SPAWN_WATER_MS = 2600;
+  const SPAWN_FOS_MS   = 2400;
+  const CAT_MIN_MS     = 7000, CAT_MAX_MS = 11000;
+  const POWER_MIN_MS   = 11000, POWER_MAX_MS = 16000;
+
+  const MAX_DROPS = 3;
+
+  const NES_VY_RANGE   = [ 90, 140 ];
+  const WATER_VY_RANGE = [ 85, 120 ];
+  const FOS_VY_RANGE   = [100, 150];
+
+  const DIFF = {
+    easy:   { spd: 0.95, rate: 0.90 },
+    med:    { spd: 1.00, rate: 1.00 },
+    hard:   { spd: 1.15, rate: 1.15 },
+    insane: { spd: 1.30, rate: 1.30 },
+  };
+
+  const VOL_THUD   = 0.25;
+  const VOL_SPLASH = 0.22;
+  const VOL_BOOM   = 0.28;
+
+  // Flip: dirección "de fábrica" de tus PNG
+  const RACCOON_FACES_RIGHT = true;
+  const CAT_FACES_RIGHT     = false;
+
+  // Dirección del gato: 'random' | 'left' | 'right' | 'alternate'
+  const CAT_DIRECTION_MODE = 'random';
+
+  // Near-miss / combo
+  const NEAR_DIST_X = 40;
+  const NEAR_DIST_Y = 60;
+  const MULT_STEP   = 0.10;
+  const MULT_MAX    = 3.0;
+
+  // Leaderboard online (desactivado por defecto)
+  const USE_ONLINE_LEADERBOARD = false;
+  const API_BASE = 'https://tu-endpoint.example'; // cambia cuando lo tengas
+  // ===================================================================
+
+  // DOM
+  const c = document.getElementById('game'), ctx = c.getContext('2d');
+  const selDiff = document.getElementById('selDiff');
+  const chkNES = document.getElementById('chkNES');
+  const chkWater = document.getElementById('chkWater');
+  const chkFos = document.getElementById('chkFos');
+  const chkDaily = document.getElementById('chkDaily');
+  const btnStart = document.getElementById('btnStart');
+  const btnPause = document.getElementById('btnPause');
+  const btnShare = document.getElementById('btnShare');
+
+  // Sprites
+  const bg = new Image(); bg.src = 'assets/background.png';
+  const raccoon = new Image(); raccoon.src = 'assets/raccoon.png';
+  const catImg = new Image(); catImg.src = 'assets/cat.png';
+  const nesImg = new Image(); nesImg.src = 'assets/nes.png';
+
+  // Estado
+  const W = CANVAS_W, H = CANVAS_H;
+  const groundY = H - GROUND_OFFSET;
+  const keys = { left:false, right:false, dash:false };
+  let running=false, lastTime=0, score=0, best=Number(localStorage.getItem('raccoon_best')||0);
+
+  // Juice: screenshake + hitstop
+  let shake=0, hitstop=0;
+  function addShake(px){ shake = Math.max(shake, px); }
+  function addHitstop(ms){ hitstop = Math.max(hitstop, ms); }
+
+  // Combo / near-miss
+  let combo=0, mult=1, nearTimer=0;
+
+  // Daily RNG
+  function mulberry32(a){ return function(){ a|=0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a>>>15, 1 | a); t = t + Math.imul(t ^ t>>>7, 61 | t) ^ t; return ((t ^ t>>>14) >>> 0) / 4294967296; } }
+  function todaySeed(){ const d=new Date(); return Number(`${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}${String(d.getUTCDate()).padStart(2,'0')}`); }
+  let RNG = Math.random; // por defecto aleatorio
+  function rrand(a,b){ return a + RNG()*(b-a); } // usa RNG en spawns
+  function pick(a,b){ return (RNG()<0.5)?a:b; }
+
+  // Parámetro ?daily=1 activa daily por URL
+  const url = new URL(location.href);
+  if (url.searchParams.get('daily')==='1') chkDaily.checked = true;
+
+  // Leaderboard local
+  const LB_KEY = 'raccoon_local_scores';
+  const NAME_KEY = 'raccoon_player_name';
+  function getName(){ let n = localStorage.getItem(NAME_KEY); if(!n){ n = prompt('Tu nombre para el ranking (3–12 chars):')||'Player'; n = String(n).slice(0,12); localStorage.setItem(NAME_KEY,n); } return n; }
+  function saveLocalScore(points){
+    const name = getName();
+    const arr = JSON.parse(localStorage.getItem(LB_KEY)||'[]');
+    arr.push({name, points, ts: Date.now()});
+    arr.sort((a,b)=>b.points-a.points);
+    localStorage.setItem(LB_KEY, JSON.stringify(arr.slice(0,20)));
+    renderLocalTop();
+  }
+  function renderLocalTop(){
+    const arr = JSON.parse(localStorage.getItem(LB_KEY)||'[]').slice(0,10);
+    const el = document.getElementById('scores');
+    el.innerHTML = arr.map((r,i)=>`<li>${r.name} — <strong>${Math.floor(r.points)}</strong></li>`).join('') || '<em>Juega una partida para registrar tu score</em>';
+  }
+  renderLocalTop();
+
+  // Jugador (con facing)
+  const player = {
+    x: W/2, y: groundY,
+    w: RACCOON_SIZE, h: RACCOON_SIZE,
+    r: RACCOON_SIZE * PLAYER_RADIUS_FACTOR,
+    speed: 4.5, vy: 0, onGround: true, dashCd: 0,
+    lives: START_LIVES, iMs: 0, helmet: 0, umbrella: 0, fireproof: 0,
+    facing: 1 // 1 derecha, -1 izquierda
+  };
+
+  // Entidades
+  const drops = [], cats = [], powerups = [], effects = [];
+
+  // Timers
+  let tNES=0, tWater=0, tFos=0, tCat=0, tPower=0;
+
+  // Saltos
+  const nowMs = () => performance.now();
+  let lastGroundedMs = 0, jumpQueuedAtMs = -1;
+
+  // Utils
+  function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+  let _catLast = 1;
+  function pickCatDir(){
+    switch ('random'){ // usa la constante si quieres: CAT_DIRECTION_MODE
+      case 'left': return -1;
+      case 'right': return 1;
+      case 'alternate': _catLast *= -1; return _catLast;
+      default: return (RNG()<0.5) ? -1 : 1;
+    }
+  }
+
+  // WebAudio
+  let audioCtx = null;
+  function ac(){ if (!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)(); return audioCtx; }
+  function buzz(ms=30){ if (navigator.vibrate) navigator.vibrate(ms); }
+
+  function playThud(){ try{ const A=ac(),dur=0.18,o=A.createOscillator(),g=A.createGain(); o.type='sine'; o.frequency.setValueAtTime(110,A.currentTime); g.gain.setValueAtTime(0.0001,A.currentTime); g.gain.exponentialRampToValueAtTime(VOL_THUD,A.currentTime+0.01); g.gain.exponentialRampToValueAtTime(0.0001,A.currentTime+dur); o.connect(g).connect(A.destination); o.start(); o.stop(A.currentTime+dur);}catch(e){} }
+  function playSplash(){ try{ const A=ac(),dur=0.25; const nBuf=A.createBuffer(1,A.sampleRate*dur,A.sampleRate); const data=nBuf.getChannelData(0); for(let i=0;i<data.length;i++) data[i]=(Math.random()*2-1)*(1-i/data.length); const n=A.createBufferSource(); n.buffer=nBuf; const hp=A.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=600; const lp=A.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=2500; const g=A.createGain(); g.gain.setValueAtTime(VOL_SPLASH,A.currentTime); g.gain.exponentialRampToValueAtTime(0.0001,A.currentTime+dur); n.connect(hp).connect(lp).connect(g).connect(A.destination); n.start(); n.stop(A.currentTime+dur);}catch(e){} }
+  function playExplosion(){ try{ const A=ac(),dur=0.35; const nBuf=A.createBuffer(1,A.sampleRate*dur,A.sampleRate); const data=nBuf.getChannelData(0); for(let i=0;i)data[i]=(Math.random()*2-1)*(1-i/data.length); const n=A.createBufferSource(); n.buffer=nBuf; const lp=A.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=1200; const g1=A.createGain(); g1.gain.setValueAtTime(VOL_BOOM,A.currentTime); g1.gain.exponentialRampToValueAtTime(0.0001,A.currentTime+dur); n.connect(lp).connect(g1).connect(A.destination); n.start(); n.stop(A.currentTime+dur); const o=A.createOscillator(),g2=A.createGain(); o.type='sine'; o.frequency.setValueAtTime(90,A.currentTime); g2.gain.setValueAtTime(VOL_BOOM*0.7,A.currentTime); g2.gain.exponentialRampToValueAtTime(0.0001,A.currentTime+dur*0.8); o.connect(g2).connect(A.destination); o.start(); o.stop(A.currentTime+dur*0.8);}catch(e){} }
+  function playMeow(){ try{ const A=ac(),dur=0.5,o=A.createOscillator(),g=A.createGain(),bp=A.createBiquadFilter(); o.type='triangle'; bp.type='bandpass'; bp.frequency.value=1000; bp.Q.value=1.2; g.gain.setValueAtTime(0.0001,A.currentTime); g.gain.exponentialRampToValueAtTime(0.20,A.currentTime+0.03); g.gain.exponentialRampToValueAtTime(0.0001,A.currentTime+dur); o.frequency.setValueAtTime(550,A.currentTime); o.frequency.linearRampToValueAtTime(700,A.currentTime+0.08); o.frequency.exponentialRampToValueAtTime(280,A.currentTime+dur); const lfo=A.createOscillator(),lfoG=A.createGain(); lfo.type='sine'; lfo.frequency.value=6; lfoG.gain.value=8; lfo.connect(lfoG).connect(o.frequency); o.connect(bp).connect(g).connect(A.destination); o.start(); lfo.start(); o.stop(A.currentTime+dur); lfo.stop(A.currentTime+dur);}catch(e){} }
+
+  // FX
+  function spawnSplash(x,y){ for(let i=0;i<14;i++){ effects.push({kind:'splash',x,y,vx:(Math.random()*160-80),vy:(Math.random()*120-260),life:0.5,r:2+Math.random()*2}); } }
+  function spawnExplosion(x,y){ for(let i=0;i<22;i++){ const a=Math.random()*Math.PI*2,sp=80+Math.random()*140; effects.push({kind:'explosion',x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:0.45,r:2+Math.random()*2}); } }
+  function spawnDebris(x,y){ for(let i=0;i<10;i++){ effects.push({kind:'debris',x,y,vx:(Math.random()*280-140),vy:(Math.random()*120-200),life:0.5,w:3+Math.random()*3,h:2+Math.random()*2}); } }
+  function updateEffects(dt){
+    for (let i=effects.length-1;i>=0;i--){
+      const e=effects[i]; e.life -= dt; if (e.life<=0){ effects.splice(i,1); continue; }
+      if (e.kind!=='explosion'){ e.vy += 900*dt; }
+      e.x += e.vx*dt; e.y += e.vy*dt;
+    }
+  }
+  function drawEffects(){
+    for (const e of effects){
+      if (e.kind==='splash'){ ctx.fillStyle='rgba(86,194,255,0.9)'; ctx.beginPath(); ctx.arc(e.x,e.y,e.r,0,Math.PI*2); ctx.fill(); }
+      else if (e.kind==='explosion'){ ctx.fillStyle='rgba(255,160,40,0.9)'; ctx.beginPath(); ctx.arc(e.x,e.y,e.r,0,Math.PI*2); ctx.fill(); }
+      else { ctx.fillStyle='rgba(180,180,180,0.95)'; ctx.fillRect(e.x-e.w/2, e.y-e.h/2, e.w, e.h); }
+    }
+  }
+
+  function drawBG(){
+    if (bg.complete){
+      const s = Math.max(W/bg.width, H/bg.height);
+      ctx.drawImage(bg, (W-bg.width*s)/2, (H-bg.height*s)/2, bg.width*s, bg.height*s);
+    } else {
+      const g = ctx.createLinearGradient(0,0,0,H);
+      g.addColorStop(0,'#0b1220'); g.addColorStop(1,'#1e293b');
+      ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+    }
+  }
+  function drawTopBar(){
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(0,0,W,32);
+    ctx.strokeStyle = 'rgba(255,255,255,.15)'; ctx.beginPath(); ctx.moveTo(0,32.5); ctx.lineTo(W,32.5); ctx.stroke();
+
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 14px system-ui';
+
+    ctx.textAlign='left';   ctx.fillText('Puntos: '+Math.floor(score), 10, 21);
+
+    ctx.textAlign='center';
+    let mid = `Mejor: ${Math.floor(best)} · x${mult.toFixed(1)}`;
+    if (nearTimer>0){ mid += '  NEAR!'; nearTimer -= 16; }
+    ctx.fillText(mid, W/2, 21);
+
+    ctx.textAlign='right';
+    let rt = '❤️'.repeat(Math.max(0,player.lives));
+    if (player.helmet>0)   rt += '  🪖×'+player.helmet;
+    if (player.umbrella>0) rt += '  ☂️×'+player.umbrella;
+    if (player.fireproof>0)rt += '  🔥'+Math.ceil(player.fireproof)+'s';
+    ctx.fillText(rt || ' ', W-10, 21);
+    ctx.restore();
+  }
+
+  function drawSprite(img, x, y, w, h, flipX=false){
+    ctx.save();
+    ctx.translate(x, y);
+    if (flipX) ctx.scale(-1, 1);
+    ctx.drawImage(img, -w/2, -h/2, w, h);
+    ctx.restore();
+  }
+  function drawPlayer(){
+    if (player.iMs>0){ const t = nowMs()/100; ctx.globalAlpha = 0.6 + 0.4*Math.sin(t); }
+    const defaultDir = RACCOON_FACES_RIGHT ? 1 : -1;
+    const needFlip = (player.facing !== defaultDir);
+    if (raccoon.complete) drawSprite(raccoon, player.x, player.y, player.w, player.h, needFlip);
+    else { ctx.font='48px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('🦝', player.x, player.y); }
+    ctx.globalAlpha = 1;
+  }
+  function drawNES(o){
+    if (!nesImg.complete) return;
+    ctx.save(); ctx.translate(o.x,o.y); ctx.rotate(o.rot||0);
+    ctx.drawImage(nesImg, -NES_SIZE/2, -NES_SIZE/2, NES_SIZE, NES_SIZE);
+    ctx.restore();
+  }
+  function drawWater(o){
+    ctx.save(); ctx.globalAlpha=0.95;
+    ctx.fillStyle='#56c2ff'; ctx.beginPath(); ctx.arc(o.x,o.y,WATER_RADIUS,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(o.x-5,o.y-6,4,0,Math.PI*2); ctx.stroke();
+    ctx.restore();
+  }
+  function drawFos(o){
+    o.wob = (o.wob||0) + 0.10;
+    ctx.save(); ctx.translate(o.x + Math.sin(o.wob)*2, o.y);
+    ctx.font = `${FOS_FONT_SIZE}px system-ui,Segoe UI Emoji`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('🧨', 0, 0);
+    ctx.restore();
+  }
+  function drawCat(c){
+    if (!catImg.complete) return;
+    const defaultDir = CAT_FACES_RIGHT ? 1 : -1;
+    const needFlip = (c.dir !== defaultDir);
+    drawSprite(catImg, c.x, groundY + 26, CAT_W, CAT_H, needFlip);
+  }
+  function drawPower(p){
+    ctx.font = `${POWER_ICON_SIZE}px system-ui,Segoe UI Emoji`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    if (p.type==='helmet') ctx.fillText('🪖', p.x, p.y);
+    else if (p.type==='umbrella') ctx.fillText('☂️', p.x, p.y);
+    else ctx.fillText('🔥', p.x, p.y);
+  }
+
+  function circleHit(ax,ay,ar,bx,by,br){ const dx=ax-bx, dy=ay-by, rr=ar+br; return dx*dx+dy*dy<=rr*rr; }
+
+  function damage(){
+    if (player.iMs>0) return true;
+    player.lives--; player.iMs = INVULN_MS;
+    try{ const A=ac(),o=A.createOscillator(),g=A.createGain(); o.type='square'; o.frequency.value=260; g.gain.value=0.06; o.connect(g).connect(A.destination); o.start(); o.stop(A.currentTime+0.12);}catch(e){}
+    buzz(60);
+    combo = 0; mult = 1; nearTimer = 0;           // reset combo
+    addShake(8); addHitstop(80);
+    return player.lives >= 0;
+  }
+
+  function reset(){
+    // RNG según daily
+    if (chkDaily.checked){
+      const seed = todaySeed();
+      RNG = mulberry32(seed);
+    } else {
+      RNG = Math.random;
+    }
+
+    drops.length=cats.length=powerups.length=effects.length=0;
+    Object.assign(player,{ x:W/2,y:groundY,vy:0,onGround:true,dashCd:0,lives:START_LIVES,iMs:0,helmet:0,umbrella:0,fireproof:0,facing:1 });
+    score=0; lastTime=0; tNES=tWater=tFos=tCat=tPower=0; jumpQueuedAtMs=-1;
+    combo=0; mult=1; nearTimer=0;
+    shake=0; hitstop=0;
+  }
+
+  function spawnDrop(type, spdMul){
+    const x = rrand(36, W-36);
+    if (type==='nes'){
+      drops.push({type,x,y:-NES_SIZE/2, r:NES_SIZE*0.38, vy: rrand(...NES_VY_RANGE)*spdMul, rot:RNG()*Math.PI, rv:(RNG()-.5)*0.06});
+    } else if (type==='water'){
+      drops.push({type,x,y:-WATER_RADIUS, r:WATER_RADIUS, vy: rrand(...WATER_VY_RANGE)*spdMul});
+    } else {
+      drops.push({type,x,y:-FOS_FONT_SIZE/2, r:FOS_FONT_SIZE*0.35, vy: rrand(...FOS_VY_RANGE)*spdMul, wob:RNG()*Math.PI*2});
+    }
+  }
+  function spawnCat(spdMul){
+    const dir = pickCatDir();
+    cats.push({ x: dir===-1? W+50 : -50, dir, speed:(90+RNG()*60)*spdMul });
+  }
+  function spawnPowerup(){
+    const t = ['helmet','umbrella','fireproof'][Math.floor(RNG()*3)];
+    powerups.push({ type:t, x: rrand(40, W-40), y: -20, r: 18, vy: 70+RNG()*30 });
+  }
+
+  function update(dt){
+    const diff = DIFF[selDiff.value] || DIFF.easy;
+
+    // Movimiento lateral + facing
+    let vx = (keys.left?-1:0) + (keys.right?1:0);
+    if (vx!==0) player.facing = vx;
+    let sp = player.speed * (1 + Math.min(score/160, 0.6)) * diff.spd;
+
+    if (keys.dash && player.dashCd<=0){ if (vx!==0) player.x += vx*28; player.dashCd = 0.45; }
+    if (player.dashCd>0) player.dashCd -= dt;
+
+    player.x = clamp(player.x + vx*sp*60*dt, player.r+2, W - player.r - 2);
+
+    // Salto coyote/buffer
+    const tNow = nowMs();
+    if (player.onGround) lastGroundedMs = tNow;
+    const canUseBuffered = (jumpQueuedAtMs>0) && (player.onGround || (tNow - lastGroundedMs) <= COYOTE_MS);
+    if (canUseBuffered){ player.vy = JUMP_V0; player.onGround=false; jumpQueuedAtMs=-1; }
+
+    if (!player.onGround){
+      player.vy += GRAVITY*dt; player.y += player.vy*dt;
+      if (player.y >= groundY){ player.y=groundY; player.vy=0; player.onGround=true; }
+    }
+
+    if (player.iMs>0) player.iMs -= dt*1000;
+    if (player.fireproof>0) player.fireproof = Math.max(0, player.fireproof - dt);
+
+    // Spawns
+    tNES+=dt*1000; tWater+=dt*1000; tFos+=dt*1000; tCat+=dt*1000; tPower+=dt*1000;
+    const canSpawnMore = drops.length < MAX_DROPS, rate = diff.rate;
+
+    if (canSpawnMore && chkNES.checked   && tNES   > SPAWN_NES_MS   / rate){ spawnDrop('nes',   diff.spd); tNES=0; }
+    if (canSpawnMore && chkWater.checked && tWater > SPAWN_WATER_MS / rate){ spawnDrop('water', diff.spd); tWater=0; }
+    if (canSpawnMore && chkFos.checked   && tFos   > SPAWN_FOS_MS   / rate){ spawnDrop('fos',   diff.spd); tFos=0; }
+    if (tCat   > (rrand(CAT_MIN_MS,   CAT_MAX_MS)))   { spawnCat(diff.spd);  tCat=0; }
+    if (tPower > (rrand(POWER_MIN_MS, POWER_MAX_MS))) { spawnPowerup();      tPower=0; }
+
+    // Drops
+    for (let i=drops.length-1;i>=0;i--){
+      const o=drops[i];
+      o.y += o.vy*dt; if (o.rot!=null) o.rot += o.rv||0;
+
+      if (o.type==='nes') drawNES(o);
+      else if (o.type==='water') drawWater(o);
+      else drawFos(o);
+
+      // Near-miss tracking: si está cerca del jugador en X/Y
+      if (!o._nm && Math.abs(o.x - player.x) < NEAR_DIST_X && Math.abs(o.y - player.y) < NEAR_DIST_Y){
+        o._nm = true;
+      }
+
+      // suelo
+      if ((o.y + o.r) >= (groundY + 2)){
+        if (o._nm && !o._hit){ combo++; mult = Math.min(MULT_MAX, 1 + combo*MULT_STEP); nearTimer = 300; addShake(2); }
+        if (o.type==='water'){ spawnSplash(o.x, groundY-6); playSplash(); addShake(4); }
+        else if (o.type==='fos'){ spawnExplosion(o.x, groundY-10); playExplosion(); addShake(10); addHitstop(80); }
+        else { spawnDebris(o.x, groundY-6); playThud(); addShake(6); addHitstop(60); }
+        drops.splice(i,1); continue;
+      }
+      if (o.y > H+60){ // offscreen -> near-miss si pasó cerca
+        if (o._nm && !o._hit){ combo++; mult = Math.min(MULT_MAX, 1 + combo*MULT_STEP); nearTimer = 300; addShake(2); }
+        drops.splice(i,1); continue;
+      }
+
+      if (circleHit(player.x, player.y, player.r, o.x, o.y, o.r)){
+        o._hit = true;
+        if (o.type==='nes'   && player.helmet>0){ player.helmet--; drops.splice(i,1); playThud(); addShake(5); addHitstop(40); continue; }
+        if (o.type==='water' && player.umbrella>0){ player.umbrella--; drops.splice(i,1); playSplash(); addShake(3); continue; }
+        if (o.type==='fos'   && player.fireproof>0){ drops.splice(i,1); playExplosion(); addShake(8); addHitstop(60); continue; }
+        if (!damage()) return false;
+        if (o.type==='water'){ spawnSplash(o.x, player.y); playSplash(); }
+        else if (o.type==='fos'){ spawnExplosion(o.x, player.y); playExplosion(); }
+        else { spawnDebris(o.x, player.y); playThud(); }
+        drops.splice(i,1);
+      }
+    }
+
+    // Gatos
+    for (let i=cats.length-1;i>=0;i--){
+      const g=cats[i];
+      g.x += g.dir*g.speed*dt;
+      drawCat(g);
+      const catTop = groundY - 10;
+      const jumpingOver = (player.y + player.r) < catTop;
+      const close = Math.abs(player.x - g.x) < (CAT_W * 0.28);
+      if (!jumpingOver && close){
+        playMeow(); addShake(6); addHitstop(60);
+        if (!damage()) return false;
+        spawnDebris(g.x, groundY-10);
+        cats.splice(i,1);
+      }
+      if (g.x < -80 || g.x > W+80) cats.splice(i,1);
+    }
+
+    // Power-ups
+    for (let i=powerups.length-1;i>=0;i--){
+      const p=powerups[i]; p.y += p.vy*dt; drawPower(p);
+      if (p.y > H+30){ powerups.splice(i,1); continue; }
+      if (circleHit(player.x, player.y, player.r, p.x, p.y, p.r)){
+        if (p.type==='helmet') player.helmet++;
+        else if (p.type==='umbrella') player.umbrella++;
+        else player.fireproof = 6;
+        buzz(15);
+        powerups.splice(i,1);
+        try{ const A=ac(),o=A.createOscillator(),g=A.createGain(); o.type='triangle'; o.frequency.value=700; g.gain.value=0.06; o.connect(g).connect(A.destination); o.start(); o.stop(A.currentTime+0.08);}catch(e){}
+      }
+    }
+
+    score += dt * 16 * mult * diff.spd;
+    updateEffects(dt);
+    return true;
+  }
+
+  function frame(ts){
+    if (!lastTime) lastTime = ts;
+    const rawDt = Math.min(0.033, (ts - lastTime) / 1000);
+    const pausedByHit = hitstop > 0;
+    const dt = pausedByHit ? 0 : rawDt;
+    lastTime = ts;
+    hitstop = Math.max(0, hitstop - rawDt*1000);
+
+    drawBG();
+    drawTopBar();
+
+    ctx.save();
+    if (shake>0){
+      ctx.translate((Math.random()*2-1)*shake, (Math.random()*2-1)*shake);
+      shake *= 0.90;
+    }
+
+    drawPlayer();
+    const alive = update(dt);
+    drawEffects();
+    ctx.restore();
+
+    if (alive && running){
+      requestAnimationFrame(frame);
+    } else if (!alive){
+      running=false;
+      best = Math.max(best, Math.floor(score));
+      localStorage.setItem('raccoon_best', String(best));
+      saveLocalScore(score);
+      // Game Over overlay
+      ctx.fillStyle='rgba(0,0,0,.55)'; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle='#fff'; ctx.textAlign='center';
+      ctx.font='bold 30px system-ui'; ctx.fillText('¡Game Over!', W/2, H/2-10);
+      ctx.font='18px system-ui';
+      ctx.fillText('Puntos: '+Math.floor(score)+' · Mejor: '+Math.floor(best), W/2, H/2+24);
+    }
+  }
+
+  // Share
+  btnShare.addEventListener('click', async ()=>{
+    const text = `Saqué ${Math.floor(score)} pts en Mapache Skater! x${mult.toFixed(1)} 💥`;
+    const url  = location.origin + location.pathname + (chkDaily.checked?'?daily=1':'');
+    if (navigator.share) {
+      try{ await navigator.share({ title:'Mapache Skater', text, url }); }catch{}
+    } else {
+      await navigator.clipboard.writeText(`${text} ${url}`);
+      alert('¡Copiado! Pégalo donde quieras.');
+    }
+  });
+
+  // Entradas
+  btnStart.addEventListener('click', ()=>{ reset(); running=true; requestAnimationFrame(frame); ac().resume?.(); });
+  btnPause.addEventListener('click', ()=>{ running=false; });
+
+  document.addEventListener('keydown', e=>{
+    if (e.key==='ArrowLeft' || e.key.toLowerCase()==='a') keys.left = true;
+    if (e.key==='ArrowRight'|| e.key.toLowerCase()==='d') keys.right= true;
+    if (e.code==='Space' || e.key==='ArrowUp' || e.key.toLowerCase()==='w'){
+      if (jumpQueuedAtMs<0) jumpQueuedAtMs = nowMs();
+    }
+    if (e.shiftKey) keys.dash = true;
+  });
+  document.addEventListener('keyup', e=>{
+    if (e.key==='ArrowLeft' || e.key.toLowerCase()==='a') keys.left = false;
+    if (e.key==='ArrowRight'|| e.key.toLowerCase()==='d') keys.right= false;
+    if (e.code==='Space' || e.key==='ArrowUp' || e.key.toLowerCase()==='w'){
+      if (jumpQueuedAtMs>0 && (nowMs()-jumpQueuedAtMs) > JUMP_BUFFER_MS) jumpQueuedAtMs = -1;
+    }
+    if (!e.shiftKey) keys.dash = false;
+  });
+
+  // Controles táctiles básicos
+  c.addEventListener('touchstart', e=>{
+    const rect = c.getBoundingClientRect();
+    const x = e.touches[0].clientX - rect.left;
+    keys.left = x < rect.width/2; keys.right = !keys.left;
+  }, {passive:true});
+  c.addEventListener('touchend', ()=>{ keys.left = keys.right = false; });
+
+  // PWA SW
+  if ('serviceWorker' in navigator){
+    navigator.serviceWorker.register('sw.js').catch(()=>{});
+  }
+})();
+</script>
+</body>
+</html>
+
+
+
